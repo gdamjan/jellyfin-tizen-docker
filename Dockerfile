@@ -1,77 +1,71 @@
-# Build jellyfin-web
-FROM node:20 as jellyfin-web
+# syntax=docker/dockerfile:1
 
-ARG JELLYFIN_BRANCH
+# Reusable image with tizen-studio
+FROM ubuntu:24.04 AS tizen-studio
 
-RUN git clone -b ${JELLYFIN_BRANCH} https://github.com/jellyfin/jellyfin-web.git /home/jellyfin/jellyfin-web
-
-WORKDIR /home/jellyfin/jellyfin-web
-
-RUN SKIP_PREPARE=1 npm ci --no-audit
-RUN USE_SYSTEM_FONTS=1 npm run build:production
-
-# Build jellyfin-tizen
-FROM node:18 as jellyfin-tizen
-
-RUN useradd -m jellyfin -s /bin/bash
-USER jellyfin
-
-RUN git clone https://github.com/jellyfin/jellyfin-tizen.git /home/jellyfin/jellyfin-tizen
-
-WORKDIR /home/jellyfin/jellyfin-tizen
-
-COPY --from=jellyfin-web --chown=jellyfin /home/jellyfin/jellyfin-web/dist/ ./dist/
-
-ENV JELLYFIN_WEB_DIR=./dist
-
-RUN npm ci --no-audit
-
-# Tizen stage
-FROM ubuntu:22.04 as build
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Poland
-
-RUN apt-get update && apt-get upgrade -y && apt-get install -y tzdata && apt-get install -y wget git expect 
-
-# Create user 
-RUN useradd -m jellyfin -s /bin/bash
-USER jellyfin
+ARG TIZEN_STUDIO_VER=6.0
 
 # Install tizen-studio
-RUN wget https://download.tizen.org/sdk/Installer/tizen-studio_5.5/web-cli_Tizen_Studio_5.5_ubuntu-64.bin -P /home/jellyfin
-RUN chmod a+x /home/jellyfin/web-cli_Tizen_Studio_5.5_ubuntu-64.bin
-RUN ./home/jellyfin/web-cli_Tizen_Studio_5.5_ubuntu-64.bin --accept-license /home/jellyfin/tizen-studio
-ENV PATH=${PATH}:/home/jellyfin/tizen-studio/tools/ide/bin:/home/jellyfin/tizen-studio/tools
+RUN --mount=type=tmpfs,target=/tmp <<EOT
+  set -ex
+  apt-get update
+  apt-get -y install curl
+  curl -L https://download.tizen.org/sdk/Installer/tizen-studio_${TIZEN_STUDIO_VER}/web-cli_Tizen_Studio_${TIZEN_STUDIO_VER}_ubuntu-64.bin -o /tmp/tizen.bin
+  chmod +x /tmp/tizen.bin
+  runuser -u ubuntu -- /tmp/tizen.bin --accept-license /home/ubuntu/tizen-studio
+EOT
 
-# Copy built app
-WORKDIR /home/jellyfin/build
-COPY --from=jellyfin-tizen --chown=jellyfin /home/jellyfin/jellyfin-tizen/config.xml ./config.xml
-COPY --from=jellyfin-tizen --chown=jellyfin /home/jellyfin/jellyfin-tizen/icon.png ./icon.png
-COPY --from=jellyfin-tizen --chown=jellyfin /home/jellyfin/jellyfin-tizen/index.html ./index.html
-COPY --from=jellyfin-tizen --chown=jellyfin /home/jellyfin/jellyfin-tizen/tizen.js ./tizen.js
-COPY --from=jellyfin-tizen --chown=jellyfin /home/jellyfin/jellyfin-tizen/www/ ./www/
+USER ubuntu
+ENV PATH=${PATH}:/home/ubuntu/tizen-studio/tools/ide/bin:/home/ubuntu/tizen-studio/tools
 
-ARG CERT_PASSWORD
-ARG CERT_FILENAME
-ARG CERT_NAME
+RUN tizen certificate --alias "Jellyfin" --password "Ho5osiek^%xeeZuCh5"
+#RUN tizen security-profiles add --name "default" \
+#    --author tizen-studio-data/keystore/author/author.p12 \
+#    --password "Ho5osiek^%xeeZuCh5"
+COPY ./profiles.xml /home/ubuntu/tizen-studio-data/profile/profiles.xml
 
-# Create certificates
-COPY cert/${CERT_FILENAME}.p12 /home/jellyfin/tizen-studio-data/keystore/author/Jellyfin.p12
 
-# Load profile
-RUN tizen security-profiles add -n ${CERT_NAME} -a /home/jellyfin/tizen-studio-data/keystore/author/Jellyfin.p12 -p ${CERT_PASSWORD}
+# Build jellyfin-web
+FROM node:22 AS jellyfin-web
 
-# Switch passwords
-RUN sed -i 's/\/home\/jellyfin\/tizen-studio-data\/keystore\/author\/Jellyfin.pwd//' /home/jellyfin/tizen-studio-data/profile/profiles.xml
-RUN sed -i 's/\/home\/jellyfin\/tizen-studio-data\/tools\/certificate-generator\/certificates\/distributor\/tizen-distributor-signer.pwd/tizenpkcs12passfordsigner/' /home/jellyfin/tizen-studio-data/profile/profiles.xml
+ARG WEB_VER=v10.10.3
 
-# Build Tizen App
+ADD https://github.com/jellyfin/jellyfin-web.git#${WEB_VER} /src/jellyfin-web
+
+WORKDIR /src/jellyfin-web
+RUN SKIP_PREPARE=1 npm ci --no-audit --no-fund --no-update-notifier
+RUN USE_SYSTEM_FONTS=1 npm run build:production
+
+
+# Build jellyfin-tizen
+FROM node:22 AS jellyfin-tizen
+
+ADD https://github.com/jellyfin/jellyfin-tizen.git#master /src/jellyfin-tizen
+
+WORKDIR /src/jellyfin-tizen
+COPY --from=jellyfin-web /src/jellyfin-web/dist/ ./dist/
+RUN JELLYFIN_WEB_DIR=./dist npm ci --no-audit --no-fund --no-update-notifier
+
+
+# Build tizen package (wgt)
+FROM tizen-studio AS package-wgt
+
+# Copy built assets
+USER ubuntu
+WORKDIR /build
+COPY --from=jellyfin-tizen --chown=ubuntu /src/jellyfin-tizen/config.xml ./config.xml
+COPY --from=jellyfin-tizen --chown=ubuntu /src/jellyfin-tizen/icon.png ./icon.png
+COPY --from=jellyfin-tizen --chown=ubuntu /src/jellyfin-tizen/index.html ./index.html
+COPY --from=jellyfin-tizen --chown=ubuntu /src/jellyfin-tizen/tizen.js ./tizen.js
+COPY --from=jellyfin-tizen --chown=ubuntu /src/jellyfin-tizen/www/ ./www/
+
+# Build and sign Tizen App
 RUN tizen build-web
+RUN tizen package -t wgt -o . -- .buildResult
 
-COPY --chown=jellyfin --chmod=744 ./scripts/package-app.sh ./package-app.sh
-COPY --chown=jellyfin --chmod=744 ./scripts/install-app.sh ./install-app.sh
+FROM tizen-studio
+WORKDIR /app
 
-RUN ./package-app.sh
-
+COPY --from=package-wgt /build/Jellyfin.wgt ./Jellyfin.wgt
+COPY --chmod=755 ./install-app.sh ./install-app.sh
 ENTRYPOINT [ "./install-app.sh" ]
