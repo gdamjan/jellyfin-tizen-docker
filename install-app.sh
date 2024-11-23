@@ -1,12 +1,15 @@
 #!/bin/bash
 
-set -ex
+set -euxo pipefail
 
-if [ -z "$TV_IP" ]
+if [ -z "$1" ]
 then
-  echo "TV_IP environment varaible is empty. Add it or overwrite the container entrypoint."
+  echo "Usage: ./install.sh <IP-ADDRESS>"
+  echo "Must specify the TV ip address."
   exit 1
 fi
+
+TV_IP=$1
 
 sdb connect ${TV_IP}
 
@@ -14,7 +17,7 @@ DEVICE_ID=$(sdb devices | grep ${TV_IP} | awk '{ print $3 }')
 
 if [ -z "$DEVICE_ID" ]
 then
-  echo "Device ID not found. Perhaps TV_IP is invalid."
+  echo "Device ID not found. Perhaps the TV ip address is incorrect."
   exit 1
 fi
 
